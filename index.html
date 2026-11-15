@@ -46,6 +46,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
 ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
 li{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
 audio{height:32px;max-width:100%}
+.live{min-height:90px;border:1px dashed var(--line);border-radius:8px;padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.live .interim{color:var(--muted)}
+li .tx{flex-basis:100%;font-size:.85rem;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere}
 kbd{font-family:var(--f-mono);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;font-size:.8rem}
 </style>
 </head>
@@ -79,6 +82,14 @@ kbd{font-family:var(--f-mono);border:1px solid var(--line);border-bottom-width:2
 
   <div class="panel">
     <div class="row" style="justify-content:space-between">
+      <strong>文字起こし</strong>
+      <button id="btnCopy" type="button" disabled>コピー</button>
+    </div>
+    <div class="live" id="live" aria-live="polite"><span class="muted" id="sttNote">録音を始めると、ここに文字が表示されます。止めると自動でコピーされるので、面接アプリの回答欄に Ctrl+V で貼り付けてください。</span></div>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="justify-content:space-between">
       <strong>録音テスト（5秒）</strong>
       <button id="btnTest" type="button">テストする</button>
     </div>
@@ -91,13 +102,14 @@ kbd{font-family:var(--f-mono);border:1px solid var(--line);border-bottom-width:2
     <ul id="list"><li class="muted small" style="border:none;padding:0">まだありません。</li></ul>
   </div>
 
-  <p class="small muted">録音した音声はこのPCの中だけで変換・保存され、インターネットには送られません。</p>
+  <p class="small muted">録音した音声はこのPCの中だけで mp3 に変換・保存され、インターネットには送られません。文字起こしはブラウザ（Edge・Chrome）の音声認識機能を使うため、認識のための音声はブラウザの提供元（Microsoft・Google）に送られます。</p>
 </div>
 
 <script>
 const THEMES = ["研究活動","学生時代に力を入れたこと","自己PR","長所・短所","挫折経験","チームでの役割","希望職種とその理由","就活の軸"];
 const $ = id => document.getElementById(id);
 let stream = null, rec = null, chunks = [], startAt = 0, timer = null, busy = false, testing = false;
+let sr = null, srOn = false, finals = "", interim = "", lastText = "";
 const saved = [];
 
 function today(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
@@ -167,12 +179,60 @@ function download(blob,name){
   return a.href;
 }
 
+
+/* ---------- 文字起こし（ブラウザ標準の音声認識） ---------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+function esc(t){ const d=document.createElement("div"); d.textContent=t; return d.innerHTML; }
+function renderLive(){
+  const t = finals + interim;
+  $("live").innerHTML = t ? esc(finals) + `<span class="interim">${esc(interim)}</span>` : '<span class="muted">聞き取り中…</span>';
+}
+function sttStart(){
+  if(!SR){ $("sttNote").textContent = "このブラウザでは文字起こしが使えません。Edge か Chrome で開いてください。"; return; }
+  finals = ""; interim = ""; srOn = true; renderLive();
+  $("btnCopy").disabled = true;
+  const make = ()=>{
+    sr = new SR(); sr.lang = "ja-JP"; sr.continuous = true; sr.interimResults = true;
+    sr.onresult = e=>{
+      interim = "";
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        const r = e.results[i];
+        if(r.isFinal) finals += r[0].transcript; else interim += r[0].transcript;
+      }
+      renderLive();
+    };
+    sr.onerror = e=>{
+      if(e.error==="not-allowed"||e.error==="service-not-allowed"){ srOn=false; $("live").innerHTML='<span class="muted">文字起こしが許可されていません。ブラウザのマイク設定を確認してください。</span>'; }
+      else if(e.error==="network"){ srOn=false; $("live").innerHTML='<span class="muted">ネットワークに接続できず、文字起こしが止まりました。録音は続いています。</span>'; }
+    };
+    sr.onend = ()=>{ if(srOn){ try{ make(); }catch(_){} } };  // 無音で切れたら再開
+    try{ sr.start(); }catch(_){}
+  };
+  make();
+}
+function sttStop(){
+  srOn = false;
+  lastText = (finals + interim).trim();
+  try{ sr && sr.stop(); }catch(_){}
+  $("btnCopy").disabled = !lastText;
+  return lastText;
+}
+async function copyText(t){
+  try{ await navigator.clipboard.writeText(t); return true; }catch(e){ return false; }
+}
+$("btnCopy").onclick = async ()=>{
+  const ok = await copyText(lastText);
+  $("btnCopy").textContent = ok ? "コピーしました" : "コピーできません";
+  setTimeout(()=> $("btnCopy").textContent = "コピー", 1500);
+};
+
 async function toggle(){
   if(busy || testing) return;
   const btn = $("btnRec");
   if(!rec || rec.state==="inactive"){
     if(!(await mic())) return;
     startRecording();
+    sttStart();
     startAt = Date.now();
     timer = setInterval(()=>{ const s=Math.floor((Date.now()-startAt)/1000); $("clock").textContent=`${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`; },250);
     btn.classList.add("on"); $("recLabel").textContent = "録音中…止める";
@@ -180,14 +240,17 @@ async function toggle(){
     setMsg(`録音中：${fileName()}`);
   } else {
     busy = true; clearInterval(timer);
+    const text = sttStop();
+    const copied = text ? copyText(text) : Promise.resolve(false);
     btn.disabled = true; $("recLabel").textContent = "mp3に変換中…";
     const name = fileName();
     try{
       const mp3 = await toMp3(await stopRecording());
       const url = download(mp3,name);
-      saved.push({name,url});
+      saved.push({name,url,text});
       renderList();
-      setMsg(`${name} を保存しました。次は Q${parseInt($("qno").value)+1} です。`,"ok");
+      const ok = await copied;
+      setMsg(`${name} を保存しました。${text ? (ok ? "文字起こしをコピーしたので、面接アプリの回答欄に Ctrl+V で貼り付けてください。" : "文字起こしは「コピー」ボタンでコピーしてください。") : "文字起こしは取れませんでした。"}次は Q${parseInt($("qno").value)+1} です。`,"ok");
       $("qno").value = parseInt($("qno").value)+1; updateName();
     }catch(e){ setMsg("mp3への変換に失敗しました。もう一度録音してください。","ng"); }
     btn.classList.remove("on"); btn.disabled = false; $("recLabel").textContent = "録音を始める";
@@ -201,7 +264,7 @@ addEventListener("keydown", e=>{
 });
 
 function renderList(){
-  $("list").innerHTML = saved.map(s=>`<li><span class="name">${s.name}</span><audio controls src="${s.url}"></audio></li>`).join("");
+  $("list").innerHTML = saved.map(s=>`<li><span class="name">${s.name}</span><audio controls src="${s.url}"></audio>${s.text?`<span class="tx">${esc(s.text)}</span>`:""}</li>`).join("");
 }
 
 $("btnTest").onclick = async ()=>{
